@@ -168,7 +168,7 @@ def get_campaigns(prefix_filter="", days_back=30):
     return results
 
 
-def enrich_campaign(c: dict) -> dict:
+def enrich_campaign(c: dict, segment_names: dict = None) -> dict:
     """Extrai e calcula métricas de uma campanha."""
     sends    = int(c.get("send_amt", 0) or 0)
     opens    = int(c.get("uniqueopens", 0) or 0)
@@ -239,22 +239,26 @@ def enrich_campaign(c: dict) -> dict:
     except Exception:
         sdate = sdate[:10] if sdate else "—"
 
+    segment_id   = int(c.get("segmentid", 0) or 0)
+    segment_name = (segment_names or {}).get(segment_id, "") if segment_id else ""
+
     return {
-        "id":         c.get("id"),
-        "name":       c.get("name", "—"),
-        "subject":    c.get("subject", "—"),
-        "sdate":      sdate,
-        "sends":      sends,
-        "opens":      opens,
-        "clicks":     clicks,
-        "unsubs":     unsubs,
-        "bounces":    bounces,
+        "id":           c.get("id"),
+        "name":         c.get("name", "—"),
+        "subject":      c.get("subject", "—"),
+        "sdate":        sdate,
+        "segmentname":  segment_name,
+        "sends":        sends,
+        "opens":        opens,
+        "clicks":       clicks,
+        "unsubs":       unsubs,
+        "bounces":      bounces,
         "open_rate":    open_rate,
         "click_rate":   click_rate,
         "bounce_rate":  round(bounces / sends * 100, 2) if sends > 0 else 0.0,
         "alerts":       alerts,
-        "status_raw":  str(c.get("status", "0")),
-        "status":      {
+        "status_raw":   str(c.get("status", "0")),
+        "status":       {
             "0": "Rascunho",
             "1": "Agendado",
             "2": "Pausado",
@@ -358,7 +362,20 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
 
     # Campanhas
     raw_campaigns = get_campaigns(prefix_filter, days_back)
-    campaigns = [enrich_campaign(c) for c in raw_campaigns]
+
+    # Nomes dos segmentos
+    print("  Buscando nomes dos segmentos...")
+    segment_ids = {int(c.get("segmentid", 0) or 0) for c in raw_campaigns if int(c.get("segmentid", 0) or 0) > 0}
+    segment_names = {}
+    for sid in segment_ids:
+        try:
+            resp = ac_get(f"segments/{sid}")
+            segment_names[sid] = resp.get("segment", {}).get("name", "")
+        except Exception:
+            segment_names[sid] = ""
+    print(f"    {len(segment_names)} segmento(s) encontrado(s)")
+
+    campaigns = [enrich_campaign(c, segment_names) for c in raw_campaigns]
 
     # Listas
     print("  Contando contatos por lista...")
@@ -600,6 +617,13 @@ def generate_html(data: dict) -> str:
     cursor: pointer; font-family: var(--mono); font-size: 11px; transition: .15s;
   }}
   .btn-export:hover {{ background: rgba(16,185,129,.2); border-color: #6ee7b7; }}
+  .btn-toggle-col {{
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); padding: 5px 10px; border-radius: 6px;
+    cursor: pointer; font-family: var(--mono); font-size: 11px; transition: .15s;
+  }}
+  .btn-toggle-col:hover {{ color: var(--accent2); border-color: var(--accent2); }}
+  .hide-segment .col-segment {{ display: none; }}
   .table-count {{ font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: auto; }}
   table {{ width: 100%; border-collapse: collapse; }}
   thead tr {{ background: rgba(124,58,237,.08); }}
@@ -787,6 +811,7 @@ def generate_html(data: dict) -> str:
       <span class="date-label">Até</span>
       <input type="date" id="dateTo" onchange="filterTable()">
       <button class="btn-clear" onclick="clearFilters()" title="Limpar todos os filtros">✕ limpar</button>
+      <button class="btn-toggle-col" onclick="toggleSegment()" id="btnSegment" title="Mostrar/ocultar coluna Segmento">⊘ Segmento</button>
       <button class="btn-export" onclick="exportToExcel()" title="Exportar para Excel">⬇ Excel</button>
       <div class="table-count" id="tableCount"></div>
     </div>
@@ -805,6 +830,7 @@ def generate_html(data: dict) -> str:
           <th class="num">Bounces</th>
           <th class="num">Bounce Rate</th>
           <th>Status</th>
+          <th class="col-segment">Segmento</th>
         </tr>
       </thead>
       <tbody id="campaignBody"></tbody>
@@ -885,6 +911,7 @@ function renderCampaigns(list) {{
       <td class="num">${{fmt(c.bounces)}}</td>
       <td class="num"><span class="rate ${{c.bounce_rate > 1 ? 'zero' : c.bounce_rate > 0.5 ? 'low' : 'mid'}}">${{c.bounce_rate}}%</span></td>
       <td>${{badge}}${{hasAlert ? '<div class="alert-cell" style="margin-top:4px">' + c.alerts.join('<br>') + '</div>' : ''}}</td>
+      <td class="col-segment" style="font-size:11px;color:var(--muted);max-width:200px">${{c.segmentname || '—'}}</td>
     </tr>`;
   }}).join('');
 }}
@@ -1031,10 +1058,19 @@ function reloadDashboard() {{
   alert('Para atualizar os dados, rode:\\n\\npython ac_dashboard.py "' + prefix + '" ' + days + '\\n\\nO dashboard será regenerado e aberto automaticamente.');
 }}
 
+function toggleSegment() {{
+  const wrap = document.querySelector('.table-wrap');
+  const btn  = document.getElementById('btnSegment');
+  const hidden = wrap.classList.toggle('hide-segment');
+  btn.textContent = hidden ? '⊕ Segmento' : '⊘ Segmento';
+  btn.style.color = hidden ? 'var(--muted)' : '';
+}}
+
 function exportToExcel() {{
   const rows = currentFiltered.map(c => ({{
     'Campanha':      c.name,
     'Assunto':       c.subject,
+    'Segmento':      c.segmentname || '',
     'Data Envio':    c.sdate,
     'Status':        c.status,
     'Enviados':      c.sends,
@@ -1312,9 +1348,9 @@ def _run():
         site_url = deploy_to_github_pages(out_path)
 
     # Envia no Slack
-    if send_to_slack:
-        print("\nEnviando no Slack...")
-        send_slack(data, site_url)
+    # if send_to_slack:
+    #     print("\nEnviando no Slack...")
+    #     send_slack(data, site_url)
 
     # Abre no browser local
     if open_browser:
