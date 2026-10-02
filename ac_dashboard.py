@@ -393,8 +393,9 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
     total_alerts = sum(len(c["alerts"]) for c in campaigns)
     print(f"\n✅ Dados coletados! {len(campaigns)} campanhas, {total_alerts} alertas encontrados.")
 
+    brt_now = datetime.now(timezone(timedelta(hours=-3)))
     return {
-        "generated_at":   datetime.now().strftime("%d/%m/%Y às %H:%M"),
+        "generated_at":   brt_now.strftime("%d/%m/%Y às %H:%M"),
         "prefix_filter":  prefix_filter or "Todas",
         "days_back":      days_back,
         "campaigns":      campaigns,
@@ -1129,9 +1130,9 @@ def send_slack(data: dict, site_url: str):
         avg_cr  = round(total_clicks / total_sends * 100, 1) if total_sends else 0
         tot_br  = round(total_bounces / total_sends * 100, 2) if total_sends else 0
 
-        # Contexto do horário de execução
-        hour = datetime.now().hour
-        run_label = "Relatório Matinal :sunrise:" if hour < 12 else "Relatório Vespertino :cityscape:"
+        # Contexto do horário de execução (BRT)
+        hour_brt = datetime.now(timezone(timedelta(hours=-3))).hour
+        run_label = "Relatório Matinal :sunrise:" if hour_brt < 12 else "Relatório Vespertino :cityscape:"
 
         # Status geral
         if total_alerts == 0:
