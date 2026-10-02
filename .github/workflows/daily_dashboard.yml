@@ -1,0 +1,36 @@
+name: AC Dashboard Diário
+
+on:
+  schedule:
+    - cron: '0 12 * * *'   # 09:00 BRT (UTC-3) — relatório matinal
+    - cron: '0 18 * * *'   # 15:00 BRT          — relatório vespertino
+  workflow_dispatch:        # Permite rodar manualmente pelo GitHub
+
+permissions:
+  contents: write           # Necessário para fazer push no GitHub Pages
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests python-dotenv
+
+      - name: Gerar e publicar dashboard
+        env:
+          AC_API_KEY:    ${{ secrets.AC_API_KEY }}
+          AC_BASE_URL:   ${{ secrets.AC_BASE_URL }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          GITHUB_TOKEN:  ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USER:   ${{ vars.AC_GITHUB_USER }}
+          GITHUB_REPO:   ${{ vars.AC_GITHUB_REPO }}
+        run: python ac_dashboard.py
