@@ -1348,9 +1348,9 @@ def _run():
         site_url = deploy_to_github_pages(out_path)
 
     # Envia no Slack
-    # if send_to_slack:
-    #     print("\nEnviando no Slack...")
-    #     send_slack(data, site_url)
+    if send_to_slack:
+        print("\nEnviando no Slack...")
+        send_slack(data, site_url)
 
     # Abre no browser local
     if open_browser:
