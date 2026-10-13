@@ -112,12 +112,9 @@ def parse_sdate(sdate_str):
 
 def get_campaigns(prefix_filter="", days_back=30):
     print(f"  Buscando campanhas (ultimos {days_back} dias)...")
-    now_utc = datetime.now(timezone.utc)
-    cutoff  = now_utc - timedelta(days=days_back)
-    # Exclui campanhas do dia atual e futuras — upper bound = meia-noite de hoje (BRT)
-    brt_tz      = timezone(timedelta(hours=-3))
-    today_brt   = datetime.now(brt_tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    upper_bound = today_brt.astimezone(timezone.utc)
+    now_utc     = datetime.now(timezone.utc)
+    cutoff      = now_utc - timedelta(days=days_back)
+    upper_bound = now_utc  # exclui apenas campanhas agendadas no futuro
 
     offset  = 0
     results = []
@@ -127,7 +124,7 @@ def get_campaigns(prefix_filter="", days_back=30):
         data = ac_get("campaigns", {
             "limit": 100,
             "offset": offset,
-            "orders[id]": "DESC",   # mais confiavel que sdate
+            "orders[sdate]": "DESC",
         })
         campaigns = data.get("campaigns", [])
         if not campaigns:
