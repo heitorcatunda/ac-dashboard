@@ -11,6 +11,7 @@ import base64
 import requests
 import webbrowser
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -73,6 +74,13 @@ MONITORED_TAGS = [
     #{"name": "LVIT4_ORG_LISTAIA",           "id": 14923},
     #{"name": "LVIT4_ORG_LISTANOCODE",       "id": 14928},
     #{"name": "LVIT4_ORG_LISTACOMUNIDADE",   "id": 14927},
+]
+
+# ─── Pares de tags mutuamente exclusivas (contato só pode ter uma) ───────────
+# Para nova turma, adicione os pares correspondentes (ex.: TURMA_01 x TURMA_03)
+EXCLUSIVE_TAG_PAIRS = [
+    {"curso": "FNAT Dados & IA", "tags": ["FNAT_ALUNO_DADOSIA_TURMA_01", "FNAT_ALUNO_DADOSIA_TURMA_02"]},
+    {"curso": "FNAT MBA",        "tags": ["FNAT_ALUNO_MBA_TURMA_01",     "FNAT_ALUNO_MBA_TURMA_02"]},
 ]
 
 
@@ -289,6 +297,62 @@ def get_tag_contact_count(tag_id: int) -> int:
     return int(data.get("meta", {}).get("total", 0))
 
 
+# ─── Conflito de turmas ───────────────────────────────────────────────────────
+
+def find_tag_id(name: str):
+    """Busca o ID exato de uma tag pelo nome."""
+    data = ac_get("tags", {"search": name, "limit": 100})
+    for t in data.get("tags", []):
+        if t["tag"].upper() == name.upper():
+            return int(t["id"])
+    return None
+
+
+def get_contacts_by_tag(tag_id: int) -> dict:
+    """Retorna {contact_id: email} de todos os contatos com a tag (paginado)."""
+    contacts = {}
+    offset = 0
+    while True:
+        data = ac_get("contacts", {"tagid": tag_id, "limit": 100, "offset": offset})
+        batch = data.get("contacts", [])
+        for c in batch:
+            contacts[c["id"]] = c.get("email", "")
+        if len(batch) < 100:
+            break
+        offset += 100
+    return contacts
+
+
+def check_tag_conflicts() -> list:
+    """Encontra contatos que têm as duas tags de um par exclusivo."""
+    print("  Verificando conflitos de turma...")
+    conflicts = []
+    for pair in EXCLUSIVE_TAG_PAIRS:
+        tag_a, tag_b = pair["tags"]
+        try:
+            id_a, id_b = find_tag_id(tag_a), find_tag_id(tag_b)
+            if not id_a or not id_b:
+                faltando = [n for n, i in ((tag_a, id_a), (tag_b, id_b)) if not i]
+                print(f"    ✗ {pair['curso']}: tag não encontrada → {', '.join(faltando)}")
+                continue
+
+            contatos_a = get_contacts_by_tag(id_a)
+            contatos_b = get_contacts_by_tag(id_b)
+            em_ambas = set(contatos_a) & set(contatos_b)
+
+            for cid in sorted(em_ambas, key=int):
+                conflicts.append({
+                    "curso":      pair["curso"],
+                    "email":      contatos_a[cid],
+                    "contact_id": cid,
+                    "tags":       f"{tag_a} + {tag_b}",
+                })
+            print(f"    {pair['curso']}: {len(contatos_a):,} x {len(contatos_b):,} → {len(em_ambas)} em ambas")
+        except Exception as e:
+            print(f"    ✗ Erro ao verificar {pair['curso']}: {e}")
+    return conflicts
+
+
 def get_account_info() -> dict:
     return {
         "contact_limit": CONTACT_LIMIT,
@@ -394,6 +458,9 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
             tags_data.append({"name": tag["name"], "id": None, "count": None})
             print(f"    {tag['name']}: não encontrada")
 
+    # Conflitos de turma
+    tag_conflicts = check_tag_conflicts()
+
     # Limites da conta
     print("  Buscando limites e contadores da conta...")
     account_info   = get_account_info()
@@ -404,22 +471,26 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
     print(f"    Contatos: {total_contacts:,} / {cl:,}")
     print(f"    Envios no mês: {monthly_sends:,} / {sl:,}")
 
-    total_alerts = sum(len(c["alerts"]) for c in campaigns)
-    print(f"\n✅ Dados coletados! {len(campaigns)} campanhas, {total_alerts} alertas encontrados.")
+    campaign_alerts = sum(len(c["alerts"]) for c in campaigns)
+    total_alerts    = campaign_alerts + len(tag_conflicts)
+    print(f"\n✅ Dados coletados! {len(campaigns)} campanhas, {total_alerts} alertas "
+          f"({campaign_alerts} de campanhas, {len(tag_conflicts)} de conflito de turma).")
 
     brt_now = datetime.now(timezone(timedelta(hours=-3)))
     return {
-        "generated_at":   brt_now.strftime("%d/%m/%Y às %H:%M"),
-        "prefix_filter":  prefix_filter or "Todas",
-        "days_back":      days_back,
-        "campaigns":      campaigns,
-        "lists":          lists_data,
-        "tags":           tags_data,
-        "total_alerts":   total_alerts,
-        "contact_limit":  account_info["contact_limit"],
-        "sending_limit":  account_info["sending_limit"],
-        "total_contacts": total_contacts,
-        "monthly_sends":  monthly_sends,
+        "generated_at":    brt_now.strftime("%d/%m/%Y às %H:%M"),
+        "prefix_filter":   prefix_filter or "Todas",
+        "days_back":       days_back,
+        "campaigns":       campaigns,
+        "lists":           lists_data,
+        "tags":            tags_data,
+        "tag_conflicts":   tag_conflicts,
+        "campaign_alerts": campaign_alerts,
+        "total_alerts":    total_alerts,
+        "contact_limit":   account_info["contact_limit"],
+        "sending_limit":   account_info["sending_limit"],
+        "total_contacts":  total_contacts,
+        "monthly_sends":   monthly_sends,
     }
 
 
@@ -429,6 +500,7 @@ def generate_html(data: dict) -> str:
     campaigns_json = json.dumps(data["campaigns"], ensure_ascii=False)
     lists_json     = json.dumps(data["lists"],     ensure_ascii=False)
     tags_json      = json.dumps(data["tags"],       ensure_ascii=False)
+    conflicts_json = json.dumps(data.get("tag_conflicts", []), ensure_ascii=False)
 
     total_sends   = sum(c["sends"]   for c in data["campaigns"])
     total_opens   = sum(c["opens"]   for c in data["campaigns"])
@@ -448,6 +520,21 @@ def generate_html(data: dict) -> str:
     sends_pct      = round(monthly_sends / sending_limit * 100, 1) if sending_limit else 0
     contact_card_class = "danger" if contact_pct > 90 else ("warning" if contact_pct > 80 else "")
     sends_card_class   = "danger" if sends_pct > 90 else ("warning" if sends_pct > 80 else "")
+
+    # Banner de conflito de turmas (montado aqui para evitar chaves duplicadas na f-string)
+    conflicts = data.get("tag_conflicts", [])
+    if conflicts:
+        conflict_rows = "".join(
+            f'<div class="alert-item"><strong>{html_escape(c["email"])}</strong> — {html_escape(c["curso"])}: '
+            f'<code>{html_escape(c["tags"])}</code> (ID {html_escape(str(c["contact_id"]))})</div>'
+            for c in conflicts
+        )
+        conflicts_html = (
+            '<div class="alerts-banner visible">'
+            f'<h3>&#9888; Conflito de turmas ({len(conflicts)})</h3>{conflict_rows}</div>'
+        )
+    else:
+        conflicts_html = ""
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -574,6 +661,7 @@ def generate_html(data: dict) -> str:
   .alert-item {{ font-size: 13px; color: #fca5a5; padding: 4px 0; border-bottom: 1px solid rgba(239,68,68,.1); }}
   .alert-item:last-child {{ border-bottom: none; }}
   .alert-item strong {{ color: #fff; }}
+  .alert-item code {{ font-family: var(--mono); font-size: 11px; }}
 
   /* ── Campaigns table ── */
   .table-wrap {{
@@ -763,7 +851,7 @@ def generate_html(data: dict) -> str:
     <div class="summary-card {'danger' if data['total_alerts'] > 0 else ''}">
       <div class="card-label">Alertas</div>
       <div class="card-value" id="sumAlerts" style="color:{'var(--danger)' if data['total_alerts'] > 0 else 'inherit'}">{data['total_alerts']}</div>
-      <div class="card-sub">campanhas com problema</div>
+      <div class="card-sub" id="sumAlertsSub">campanhas + turmas</div>
     </div>
     <div class="summary-card {'danger' if bounce_rate_total > 2 else 'warning' if bounce_rate_total > 1 else ''}">
       <div class="card-label">Total Bounces</div>
@@ -788,13 +876,16 @@ def generate_html(data: dict) -> str:
   </div>
 
   <!-- Alerts banner -->
-  <div class="alerts-banner {'visible' if data['total_alerts'] > 0 else ''}" id="alertsBanner">
+  <div class="alerts-banner {'visible' if data.get('campaign_alerts', 0) > 0 else ''}" id="alertsBanner">
     <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;" onclick="toggleAlerts()">
       <h3 style="margin:0">&#9888; Alertas detectados <span id="alertsCount" style="font-size:11px;opacity:.7"></span></h3>
       <button id="alertsToggleBtn" style="background:rgba(239,68,68,.2);border:1px solid rgba(239,68,68,.4);color:#fca5a5;font-size:11px;padding:4px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono)">RECOLHER</button>
     </div>
     <div id="alertsList" style="margin-top:12px"></div>
   </div>
+
+  <!-- Conflito de turmas -->
+  {conflicts_html}
 
   <!-- Campaigns table -->
   <div class="section-title">📊 Campanhas</div>
@@ -860,9 +951,10 @@ def generate_html(data: dict) -> str:
 </div>
 
 <script>
-const CAMPAIGNS = {campaigns_json};
-const LISTS     = {lists_json};
-const TAGS      = {tags_json};
+const CAMPAIGNS     = {campaigns_json};
+const LISTS         = {lists_json};
+const TAGS          = {tags_json};
+const TAG_CONFLICTS = {conflicts_json};
 
 function fmt(n) {{
   if (n === null || n === undefined) return '—';
@@ -976,7 +1068,9 @@ function updateSummary(list) {{
   const avgCR = totalSends ? (totalClicks  / totalSends * 100).toFixed(1) : 0;
   const avgBR = totalSends ? (totalBounces / totalSends * 100).toFixed(2) : 0;
   const avgUR = totalSends ? (totalUnsubs  / totalSends * 100).toFixed(2) : 0;
-  const totalAlerts = list.reduce((s,c) => s + (c.alerts ? c.alerts.length : 0), 0);
+  // Conflitos de turma não dependem dos filtros de campanha: sempre somam
+  const campaignAlerts = list.reduce((s,c) => s + (c.alerts ? c.alerts.length : 0), 0);
+  const totalAlerts    = campaignAlerts + TAG_CONFLICTS.length;
 
   document.getElementById('sumCampaigns').textContent  = list.length;
   document.getElementById('sumSends').textContent      = fmt(totalSends);
@@ -989,6 +1083,14 @@ function updateSummary(list) {{
   document.getElementById('sumBounceRate').textContent = avgBR + '% dos enviados';
   document.getElementById('sumUnsubs').textContent     = fmt(totalUnsubs);
   document.getElementById('sumUnsubRate').textContent  = avgUR + '% dos enviados';
+}}
+
+function renderAlertsSub() {{
+  const el = document.getElementById('sumAlertsSub');
+  if (!el) return;
+  el.textContent = TAG_CONFLICTS.length > 0
+    ? TAG_CONFLICTS.length + ' de conflito de turma'
+    : 'campanhas + turmas';
 }}
 
 let alertsCollapsed = false;
@@ -1083,6 +1185,18 @@ function exportToExcel() {{
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Campanhas');
+
+  // Aba extra com conflitos de turma, se houver
+  if (TAG_CONFLICTS.length > 0) {{
+    const conflictRows = TAG_CONFLICTS.map(c => ({{
+      'Curso':      c.curso,
+      'E-mail':     c.email,
+      'Contact ID': c.contact_id,
+      'Tags':       c.tags,
+    }}));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(conflictRows), 'Conflito de turmas');
+  }}
+
   XLSX.writeFile(wb, 'ac_campanhas.xlsx');
 }}
 
@@ -1090,6 +1204,7 @@ function exportToExcel() {{
 renderCampaigns(CAMPAIGNS);
 renderAlerts(CAMPAIGNS);
 renderContacts();
+renderAlertsSub();
 </script>
 </body>
 </html>"""
@@ -1151,8 +1266,9 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK", "")
 def send_slack(data: dict, site_url: str):
     """Envia resumo no Slack com link para o dashboard."""
     try:
-        total_alerts = data["total_alerts"]
+        total_alerts = data["total_alerts"]  # campanhas + conflitos de turma
         campaigns    = data["campaigns"]
+        conflicts    = data.get("tag_conflicts", [])
         sent = [c for c in campaigns if c["status"] in ("Enviado", "Agendado") and c["sends"] > 0]
 
         total_sends   = sum(c["sends"]   for c in sent)
@@ -1190,7 +1306,7 @@ def send_slack(data: dict, site_url: str):
         if tot_br > 1:
             bounce_warning = f":red_circle: *Bounce total: {tot_br}%* — acima de 1%, verifique as listas\n"
 
-        # Lista de alertas (máx 8)
+        # Lista de alertas de campanha (máx 8)
         alert_lines = []
         for c in campaigns:
             for a in (c.get("alerts") or []):
@@ -1233,6 +1349,18 @@ def send_slack(data: dict, site_url: str):
             blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"*Alertas:*\n{alert_block}"}
+            })
+
+        # Conflito de turmas (máx 10)
+        if conflicts:
+            linhas = [f"  • {c['email']} — {c['curso']}" for c in conflicts[:10]]
+            if len(conflicts) > 10:
+                linhas.append(f"  _...e mais {len(conflicts) - 10} no dashboard_")
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn",
+                         "text": f":busts_in_silhouette: *Conflito de turmas ({len(conflicts)}):*\n" + "\n".join(linhas)}
             })
 
         blocks.append({"type": "divider"})
