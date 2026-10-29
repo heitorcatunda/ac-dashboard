@@ -323,10 +323,16 @@ def get_contacts_by_tag(tag_id: int) -> dict:
     return contacts
 
 
-def check_tag_conflicts() -> list:
-    """Encontra contatos que têm as duas tags de um par exclusivo."""
+def check_tag_conflicts() -> tuple:
+    """Encontra contatos que têm as duas tags de um par exclusivo.
+
+    Retorna (conflicts, checks):
+      conflicts → lista de contatos em conflito
+      checks    → resumo de cada par verificado (contagens e status)
+    """
     print("  Verificando conflitos de turma...")
     conflicts = []
+    checks = []
     for pair in EXCLUSIVE_TAG_PAIRS:
         tag_a, tag_b = pair["tags"]
         try:
@@ -334,6 +340,8 @@ def check_tag_conflicts() -> list:
             if not id_a or not id_b:
                 faltando = [n for n, i in ((tag_a, id_a), (tag_b, id_b)) if not i]
                 print(f"    ✗ {pair['curso']}: tag não encontrada → {', '.join(faltando)}")
+                checks.append({"curso": pair["curso"], "ok": False,
+                               "erro": f"tag não encontrada: {', '.join(faltando)}"})
                 continue
 
             contatos_a = get_contacts_by_tag(id_a)
@@ -348,9 +356,17 @@ def check_tag_conflicts() -> list:
                     "tags":       f"{tag_a} + {tag_b}",
                 })
             print(f"    {pair['curso']}: {len(contatos_a):,} x {len(contatos_b):,} → {len(em_ambas)} em ambas")
+            checks.append({
+                "curso":   pair["curso"],
+                "ok":      True,
+                "tag_a":   tag_a, "count_a": len(contatos_a),
+                "tag_b":   tag_b, "count_b": len(contatos_b),
+                "both":    len(em_ambas),
+            })
         except Exception as e:
             print(f"    ✗ Erro ao verificar {pair['curso']}: {e}")
-    return conflicts
+            checks.append({"curso": pair["curso"], "ok": False, "erro": str(e)})
+    return conflicts, checks
 
 
 def get_account_info() -> dict:
@@ -459,7 +475,7 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
             print(f"    {tag['name']}: não encontrada")
 
     # Conflitos de turma
-    tag_conflicts = check_tag_conflicts()
+    tag_conflicts, conflict_checks = check_tag_conflicts()
 
     # Limites da conta
     print("  Buscando limites e contadores da conta...")
@@ -485,6 +501,7 @@ def collect_data(prefix_filter: str = "", days_back: int = 30) -> dict:
         "lists":           lists_data,
         "tags":            tags_data,
         "tag_conflicts":   tag_conflicts,
+        "conflict_checks": conflict_checks,
         "campaign_alerts": campaign_alerts,
         "total_alerts":    total_alerts,
         "contact_limit":   account_info["contact_limit"],
@@ -521,8 +538,26 @@ def generate_html(data: dict) -> str:
     contact_card_class = "danger" if contact_pct > 90 else ("warning" if contact_pct > 80 else "")
     sends_card_class   = "danger" if sends_pct > 90 else ("warning" if sends_pct > 80 else "")
 
-    # Banner de conflito de turmas (montado aqui para evitar chaves duplicadas na f-string)
+    # Painel de conflito de turmas (sempre visível; montado aqui para evitar chaves duplicadas na f-string)
     conflicts = data.get("tag_conflicts", [])
+    checks    = data.get("conflict_checks", [])
+
+    check_lines = []
+    for ck in checks:
+        if ck["ok"]:
+            check_lines.append(
+                f'<div class="check-line"><strong>{html_escape(ck["curso"])}</strong>: '
+                f'{ck["count_a"]:,} (turma 01) x {ck["count_b"]:,} (turma 02) → '
+                f'{ck["both"]} em ambas</div>'
+            )
+        else:
+            check_lines.append(
+                f'<div class="check-line check-err"><strong>{html_escape(ck["curso"])}</strong>: '
+                f'&#10007; {html_escape(ck["erro"])}</div>'
+            )
+    checks_html = "".join(check_lines)
+    has_check_error = any(not ck["ok"] for ck in checks)
+
     if conflicts:
         conflict_rows = "".join(
             f'<div class="alert-item"><strong>{html_escape(c["email"])}</strong> — {html_escape(c["curso"])}: '
@@ -531,7 +566,20 @@ def generate_html(data: dict) -> str:
         )
         conflicts_html = (
             '<div class="alerts-banner visible">'
-            f'<h3>&#9888; Conflito de turmas ({len(conflicts)})</h3>{conflict_rows}</div>'
+            f'<h3>&#9888; Conflito de turmas ({len(conflicts)})</h3>{conflict_rows}'
+            f'<div class="check-summary">{checks_html}</div></div>'
+        )
+    elif has_check_error:
+        conflicts_html = (
+            '<div class="conflict-panel warn">'
+            '<h3>&#9888; Conflito de turmas: verificação incompleta</h3>'
+            f'{checks_html}</div>'
+        )
+    elif checks:
+        conflicts_html = (
+            '<div class="conflict-panel ok">'
+            '<h3>&#10003; Conflito de turmas: nenhum</h3>'
+            f'{checks_html}</div>'
         )
     else:
         conflicts_html = ""
@@ -662,6 +710,20 @@ def generate_html(data: dict) -> str:
   .alert-item:last-child {{ border-bottom: none; }}
   .alert-item strong {{ color: #fff; }}
   .alert-item code {{ font-family: var(--mono); font-size: 11px; }}
+
+  /* ── Painel de conflito de turmas ── */
+  .conflict-panel {{
+    border-radius: 12px; padding: 14px 20px; margin-bottom: 32px;
+  }}
+  .conflict-panel h3 {{ font-size: 13px; font-weight: 700; margin-bottom: 8px; font-family: var(--mono); text-transform: uppercase; letter-spacing: 1px; }}
+  .conflict-panel.ok   {{ background: rgba(16,185,129,.08); border: 1px solid rgba(16,185,129,.3); }}
+  .conflict-panel.ok h3 {{ color: var(--success); }}
+  .conflict-panel.warn {{ background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.3); }}
+  .conflict-panel.warn h3 {{ color: var(--accent3); }}
+  .check-line {{ font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 2px 0; }}
+  .check-line strong {{ color: var(--text); font-weight: 600; }}
+  .check-line.check-err {{ color: #fcd34d; }}
+  .check-summary {{ margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(239,68,68,.15); }}
 
   /* ── Campaigns table ── */
   .table-wrap {{
@@ -1351,16 +1413,34 @@ def send_slack(data: dict, site_url: str):
                 "text": {"type": "mrkdwn", "text": f"*Alertas:*\n{alert_block}"}
             })
 
-        # Conflito de turmas (máx 10)
+        # Conflito de turmas (sempre mostra o resultado da verificação)
+        checks = data.get("conflict_checks", [])
+        resumo = []
+        for ck in checks:
+            if ck["ok"]:
+                resumo.append(f"  {ck['curso']}: {ck['count_a']:,} x {ck['count_b']:,} → {ck['both']} em ambas")
+            else:
+                resumo.append(f"  :warning: {ck['curso']}: {ck['erro']}")
+
         if conflicts:
             linhas = [f"  • {c['email']} — {c['curso']}" for c in conflicts[:10]]
             if len(conflicts) > 10:
                 linhas.append(f"  _...e mais {len(conflicts) - 10} no dashboard_")
+            texto = f":busts_in_silhouette: *Conflito de turmas ({len(conflicts)}):*\n" + "\n".join(linhas)
+        elif any(not ck["ok"] for ck in checks):
+            texto = ":warning: *Conflito de turmas: verificação incompleta*"
+        elif checks:
+            texto = ":white_check_mark: *Conflito de turmas: nenhum*"
+        else:
+            texto = ""
+
+        if texto:
+            if resumo:
+                texto += "\n_" + "_\n_".join(r.strip() for r in resumo) + "_"
             blocks.append({"type": "divider"})
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn",
-                         "text": f":busts_in_silhouette: *Conflito de turmas ({len(conflicts)}):*\n" + "\n".join(linhas)}
+                "text": {"type": "mrkdwn", "text": texto}
             })
 
         blocks.append({"type": "divider"})
